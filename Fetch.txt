@@ -1,0 +1,98 @@
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+
+const prefix = '!'; // U CAN CHANGE THE PREFIX TO WTV U WABT
+
+client.on('ready', () => {
+    console.log(`Logged in as ${client.user.tag}`);
+});
+
+client.on('messageCreate', async message => {
+    if (!message.content.startsWith(prefix) || message.author.bot) return;
+
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    if (command === 'tag') {
+        const input = args[0];
+        if (!input) {
+            return message.reply('Please provide an invite link or code.');
+        }
+
+        try {
+            // Extract invite code from different formats
+            let inviteCode = input;
+            if (input.includes('/')) {
+                inviteCode = input.split('/').pop();
+            }
+            if (inviteCode.includes('.')) {
+                inviteCode = inviteCode.split('.').pop();
+            }
+
+            const headers = {
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Authorization': '..',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'X-Super-Properties': Buffer.from(JSON.stringify({
+                    "os": "Windows",
+                    "browser": "Chrome",
+                    "device": "",
+                    "system_locale": "en-US",
+                    "browser_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "browser_version": "120.0.0.0",
+                    "os_version": "10",
+                    "referrer": "",
+                    "referring_domain": "",
+                    "referrer_current": "",
+                    "referring_domain_current": "",
+                    "release_channel": "stable",
+                    "client_build_number": 246012,
+                    "client_event_source": null
+                })).toString('base64')
+            };
+
+            const inviteResponse = await fetch(`https://discord.com/api/v9/invites/${inviteCode}?with_counts=true&with_expiration=true`, {
+                method: 'GET',
+                headers
+            });
+
+            if (!inviteResponse.ok) {
+                return message.reply('Invalid invite code.');
+            }
+
+            const inviteData = await inviteResponse.json();
+            const serverId = inviteData.guild.id;
+            const serverTag = inviteData.profile?.tag;
+            const badgeHash = inviteData.profile?.badge_hash;
+            
+            const embed = new EmbedBuilder()
+                .setColor('#2b2d31')
+                .setTitle(inviteData.guild.name)
+                .setDescription(`Server ID: ${serverId}`);
+
+            if (serverTag) {
+                embed.addFields({ name: 'Server Tag', value: serverTag });
+            }
+
+            if (inviteData.guild.icon) {
+                const iconUrl = `https://cdn.discordapp.com/icons/${serverId}/${inviteData.guild.icon}.${inviteData.guild.icon.startsWith('a_') ? 'gif' : 'png'}`;
+                embed.setThumbnail(iconUrl);
+            }
+
+            if (badgeHash) {
+                const badgeUrl = `https://cdn.discordapp.com/clan-badges/${serverId}/${badgeHash}.png?size=32`;
+                embed.setImage(badgeUrl);
+            }
+
+            await message.reply({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error:', error);
+            await message.reply('An error occurred while fetching the server information.');
+        }
+    }
+});
+
+// Replace with the bot's token
+client.login('..'); 
