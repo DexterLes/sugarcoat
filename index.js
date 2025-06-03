@@ -18,7 +18,6 @@ const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder
 const fs = require("fs");
 const Fuse = require("fuse.js");
 const inviteChecker = require('./invite.js'); // Assumes invite.js exports async function checkInvite(link)
-const { spawn } = require("child_process"); // PATCH: Added for emoji fetch
 
 const TOKEN = process.env.TOKEN;
 const JSON_FILE = "./DBTag.json";
@@ -944,145 +943,38 @@ client.on("messageCreate", async (message) => {
     // Prioritize Fonted.json, then DBTag.json
     const combinedResults = [...keywordResults, ...normResults];
 
-    // --- PATCHED PAGINATION+SYMBOLS FETCH SECTION ---
     if (combinedResults.length > 0) {
       let page = 0;
       const pageSize = 5;
       const totalPages = Math.ceil(combinedResults.length / pageSize);
 
-      // Animate embed color between yellow (0xffd700) and black (0x000000)
-      const ANIMATION_COLORS = [0xffd700, 0x000000];
-
-      // Utility for delay
-      function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
-
-      // Call fetch.js for link, expect emoji string in stdout, else error emoji
-      function fetchEmojiForLink(link) {
-        return new Promise(res => {
-          let output = "";
-          const child = spawn("node", ["fetch.js", link]);
-          child.stdout.on("data", chunk => output += chunk.toString());
-          child.on("close", () => {
-            output = output.trim();
-            if (output.startsWith("<:") || output.startsWith("<a:")) {
-              res(output);
-            } else {
-              res("<:CircleWarn:1373243873362706443>");
-            }
-          });
-          child.on("error", () => res("<:CircleWarn:1373243873362706443>"));
-        });
-      }
-
-      // Helper to build embed description with emojiList
-      function buildPagedDescriptionWithEmojis(results, page, pageSize, emojiList) {
+      function buildPagedDescription(results, page, pageSize) {
         const chunk = results.slice(page * pageSize, (page + 1) * pageSize);
         let desc = "";
-
-        // Fonted.json section
         if (keywordResults.length > 0 && page * pageSize < keywordResults.length) {
           const fontedChunk = chunk.filter(t => keywordResults.includes(t));
           if (fontedChunk.length > 0) {
             desc += `**Results from Fonted.json:**\n`;
-            fontedChunk.forEach((t, i) => {
-              const idx = chunk.indexOf(t);
-              const emoji = idx >= 0 && emojiList[idx] ? emojiList[idx] : "<a:loading:1373152608759582771>";
-              desc += `**> ${emoji} Tag: \`${t.name.replace(/^> Tags: /, "")}\`**\n${t.link}\n\n`;
-            });
+            desc += fontedChunk.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
           }
         }
-        // DBTag.json section
         if (normResults.length > 0) {
           const dbChunk = chunk.filter(t => normResults.includes(t));
           if (dbChunk.length > 0) {
-            if (desc) desc += '\n';
+            if (desc) desc += '\n\n';
             desc += `**Results from DBTag.json:**\n`;
-            dbChunk.forEach((t, i) => {
-              const idx = chunk.indexOf(t);
-              const emoji = idx >= 0 && emojiList[idx] ? emojiList[idx] : "<a:loading:1373152608759582771>";
-              desc += `**> ${emoji} Tag: \`${t.name.replace(/^> Tags: /, "")}\`**\n${t.link}\n\n`;
-            });
+            desc += dbChunk.map(t => `**${t.name}**\n${t.link}`).join('\n\n');
           }
         }
-        return desc.trim();
+        return desc;
       }
 
-      // Helper to update embed with footer/color
-      async function updateEmbed(sent, results, page, pageSize, emojiList, color, footerText) {
-        const desc = buildPagedDescriptionWithEmojis(results, page, pageSize, emojiList);
-        const embed = buildEmbed(
-          `Found ${combinedResults.length} tag(s) for "${tagQuery}" (Page ${page + 1}/${totalPages})`,
-          desc,
-          color
-        );
-        if (footerText) embed.setFooter({ text: footerText });
-        await sent.edit({ content: `<@${message.author.id}>`, embeds: [embed] });
-      }
-
-      // Main symbols fetch+pagination logic
-      async function runPage(page) {
-        let emojiList = Array(Math.min(pageSize, combinedResults.length - page * pageSize)).fill("<a:loading:1373152608759582771>");
-        let animColorIdx = 0;
-        let animating = true;
-        let footerText = "Fetching symbols...";
-
-        // 1. Initial embed with loading emojis, yellow color
-        await updateEmbed(sent, combinedResults, page, pageSize, emojiList, ANIMATION_COLORS[animColorIdx], footerText);
-
-        // 2. Animate color while fetching
-        const animInterval = setInterval(() => {
-          if (!animating) return;
-          animColorIdx ^= 1;
-          updateEmbed(sent, combinedResults, page, pageSize, emojiList, ANIMATION_COLORS[animColorIdx], footerText);
-        }, 700);
-
-        // 3. Fetch emojis for each link, update as soon as each is ready, with retry+delay
-        const chunk = combinedResults.slice(page * pageSize, (page + 1) * pageSize);
-        let uploadedEmojis = []; // for later deletion
-        for (let i = 0; i < chunk.length; ++i) {
-          let tries = 0, emoji = "<:CircleWarn:1373243873362706443>";
-          while (tries < 3) {
-            emoji = await fetchEmojiForLink(chunk[i].link);
-            if (emoji !== "<:CircleWarn:1373243873362706443>") break;
-            tries++;
-            await sleep(1200);
-          }
-          emojiList[i] = emoji;
-          if (emoji.startsWith("<:") || emoji.startsWith("<a:")) {
-            uploadedEmojis.push(emoji);
-          }
-          await updateEmbed(sent, combinedResults, page, pageSize, emojiList, ANIMATION_COLORS[animColorIdx], footerText);
-          await sleep(1200);
-        }
-
-        // 4. Stop animation, turn embed green, set footer to "fetched symbols"
-        animating = false;
-        clearInterval(animInterval);
-        footerText = "Fetched symbols";
-        await updateEmbed(sent, combinedResults, page, pageSize, emojiList, 0x32cd32, footerText);
-
-        // 5. After 5s, remove footer
-        setTimeout(async () => {
-          await updateEmbed(sent, combinedResults, page, pageSize, emojiList, 0x32cd32, "");
-        }, 5000);
-
-        // 6. After 60s, delete uploaded emojis from server (calls fetch.js --delete link)
-        setTimeout(() => {
-          chunk.forEach((result, idx) => {
-            if (
-              uploadedEmojis[idx] && 
-              (uploadedEmojis[idx].startsWith("<:") || uploadedEmojis[idx].startsWith("<a:"))
-            ) {
-              spawn("node", ["fetch.js", "--delete", result.link]);
-            }
-          });
-        }, 60000);
-      }
-
-      // Initial call
-      await runPage(page);
-
-      // Pagination controls (next/prev)
+      let desc = buildPagedDescription(combinedResults, page, pageSize);
+      const embed = buildEmbed(
+        `Found ${combinedResults.length} tag(s) for "${tagQuery}" (Page ${page + 1}/${totalPages})`,
+        desc,
+        0x32cd32
+      );
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("search_prev")
@@ -1095,11 +987,7 @@ client.on("messageCreate", async (message) => {
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(totalPages <= 1)
       );
-      await sent.edit({
-        content: `<@${message.author.id}>`,
-        embeds: [sent.embeds[0]],
-        components: [row]
-      });
+      await sent.edit({ content: `<@${message.author.id}>`, embeds: [embed], components: [row] });
 
       const filter = (interaction) =>
         (interaction.customId === "search_prev" || interaction.customId === "search_next") &&
@@ -1111,13 +999,16 @@ client.on("messageCreate", async (message) => {
       collector.on("collect", async (interaction) => {
         if (interaction.customId === "search_prev" && page > 0) {
           page--;
-          await runPage(page);
         } else if (interaction.customId === "search_next" && page < totalPages - 1) {
           page++;
-          await runPage(page);
         }
-        // Update buttons
-        const newRow = new ActionRowBuilder().addComponents(
+        desc = buildPagedDescription(combinedResults, page, pageSize);
+        const embedUpdated = buildEmbed(
+          `Found ${combinedResults.length} tag(s) for "${tagQuery}" (Page ${page + 1}/${totalPages})`,
+          desc,
+          0x32cd32
+        );
+        const rowUpdated = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId("search_prev")
             .setLabel("⬅️")
@@ -1129,30 +1020,99 @@ client.on("messageCreate", async (message) => {
             .setStyle(ButtonStyle.Secondary)
             .setDisabled(page >= totalPages - 1)
         );
-        await interaction.update({
-          embeds: [sent.embeds[0]],
-          components: [newRow]
-        });
+        await interaction.update({ embeds: [embedUpdated], components: [rowUpdated] });
       });
 
       return;
     }
+  } catch (e) {}
 
-    // If no results found, always reply with an embed
-    const notFoundEmbed = buildEmbed(
-      `🔍 Tag Not Found`,
-      `Sorry, no tag found for: **${tagQuery}**`,
+  // Fuzzy search fallback (NO ANIMATION, just results)
+  try {
+    const allTags = loadTags();
+    results = searchTagsFuzzy(tagQuery, allTags);
+
+    if (results.length > 0) {
+      let page = 0;
+      const pageSize = 3;
+      const totalPages = Math.ceil(results.length / pageSize);
+      let desc = buildTagDescription(results.slice(page * pageSize, (page + 1) * pageSize));
+      let embed = buildEmbed(`✅ Found ${results.length} Tags (Page ${page + 1}/${totalPages})`, desc, 0x32cd32);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("fuzzy_prev")
+          .setLabel("⬅️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId("fuzzy_next")
+          .setLabel("➡️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(totalPages <= 1)
+      );
+
+      await sent.edit({ content: `<@${message.author.id}>`, embeds: [embed], components: [row] });
+
+      const filter = (interaction) =>
+        (interaction.customId === "fuzzy_prev" || interaction.customId === "fuzzy_next") &&
+        interaction.message.id === sent.id &&
+        interaction.user.id === message.author.id;
+
+      const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
+
+      collector.on("collect", async (interaction) => {
+        if (interaction.customId === "fuzzy_prev" && page > 0) {
+          page--;
+        } else if (interaction.customId === "fuzzy_next" && page < totalPages - 1) {
+          page++;
+        }
+        desc = buildTagDescription(results.slice(page * pageSize, (page + 1) * pageSize));
+        embed = buildEmbed(`✅ Found ${results.length} Tags (Page ${page + 1}/${totalPages})`, desc, 0x32cd32);
+        const rowUpdated = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("fuzzy_prev")
+            .setLabel("⬅️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === 0),
+          new ButtonBuilder()
+            .setCustomId("fuzzy_next")
+            .setLabel("➡️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+        );
+        await interaction.update({ embeds: [embed], components: [rowUpdated] });
+      });
+    } else {
+      let noResultMsg = "";
+      if (tagQuery.length > 4) {
+        noResultMsg = "No Match Found, Try 4 Letters";
+      } else {
+        noResultMsg = "No Match Found, Be More Specific";
+      }
+      const noResultEmbed = buildEmbed(
+        `🔴 No Results`,
+        noResultMsg,
+        0xff0000
+      );
+      await sent.edit({ content: `<@${message.author.id}>`, embeds: [noResultEmbed], components: [] });
+
+      if (tagShouldBeLogged(tagQuery)) {
+        const notFound = loadNotFoundTags();
+        notFound[tagQuery] = (notFound[tagQuery] || 0) + 1;
+        saveNotFoundTags(notFound);
+        const channel = await client.channels.fetch(LOGGING_CHANNEL_ID);
+        await updateNotFoundEmbed(channel);
+      }
+    }
+  } catch {
+    const noResultEmbed = buildEmbed(
+      "🔴 No Results",
+      "No Match Found",
       0xff0000
     );
-    await sent.edit({ content: `<@${message.author.id}>`, embeds: [notFoundEmbed], components: [] });
-  } catch (e) {
-    const errorEmbed = buildEmbed(
-      `❌ Error`,
-      `An error occurred while searching for the tag.`,
-      0xff0000
-    );
-    await sent.edit({ embeds: [errorEmbed] });
+    await sent.edit({ embeds: [noResultEmbed], components: [] });
   }
 });
 
-// ... [unchanged code below] ...
+client.login(TOKEN);
