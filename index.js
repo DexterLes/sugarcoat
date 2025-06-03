@@ -42,6 +42,25 @@ const LOGGING_CHANNEL_ID = "1373983013087613049";
 const NOT_FOUND_FILE = "./notFoundTags.json";
 const NOT_FOUND_EMBED_FILE = "./notFoundEmbedMsg.json";
 
+// === NEW: Search History and Disabled Channels ===
+const HISTORY_FILE = "./history.json";
+const DISABLED_CHANNELS_FILE = "./disabledChannels.json";
+function loadHistory() {
+  try { return JSON.parse(fs.readFileSync(HISTORY_FILE)); } catch { return { users: {}, global: {} }; }
+}
+function saveHistory(obj) {
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(obj, null, 2)); return true; } catch { return false; }
+}
+function loadDisabledChannels() {
+  try { return JSON.parse(fs.readFileSync(DISABLED_CHANNELS_FILE)); } catch { return []; }
+}
+function saveDisabledChannels(arr) {
+  try { fs.writeFileSync(DISABLED_CHANNELS_FILE, JSON.stringify(arr, null, 2)); return true; } catch { return false; }
+}
+
+// === NEW: First-time search user map (in-memory, resets on restart) ===
+const firstTimeSearchMap = new Set();
+
 function loadNotFoundTags() {
   try {
     return JSON.parse(fs.readFileSync(NOT_FOUND_FILE, "utf8"));
@@ -249,7 +268,7 @@ client.on("guildCreate", async (guild) => {
   }
 });
 
-// --- !help Command Handler ---
+// --- UPDATED: !help Command Handler ---
 client.on("messageCreate", async (message) => {
   if (
     message.author.bot ||
@@ -257,46 +276,38 @@ client.on("messageCreate", async (message) => {
     message.content.trim().toLowerCase() !== "!help"
   ) return;
 
-  if (message.deletable) {
-    try { await message.delete(); } catch (e) {}
-  }
-
-  const helpEmbed = new EmbedBuilder()
-    .setTitle("**Commands**")
-    .setDescription(
-      `@Bot addtag\nor \n@Bot at\n\n` +
-      `**Use:** @Bot addtag name, url\n` +
-      `**Who:** Only users with BACKEND ACCESS role\n` +
-      `**What:** Adds a tag to the database\n\n` +
-      `@Bot DT, [Link]\n` +
-      `**Use:** @Bot DT, link\n` +
-      `**Who:** Only users with BACKEND ACCESS role\n` +
-      `**What:** Delete tag by link, asks for confirmation\n\n` +
-      `@Bot RL, [Old Link] [New Link]\n` +
-      `**Use:** @Bot RL, oldLink newLink\n` +
-      `**Who:** Only users with BACKEND ACCESS role\n` +
-      `**What:** Replace tag's link, asks for confirmation\n\n` +
-      `@Bot Show Japanese/Chinese/Korean\n\n` +
-      `**Use:** @Bot show chinese/korean/japanese\n` +
-      `**Who:** Anyone\n` +
-      `**What:** Shows tags with Chinese, Korean, or Japanese text\n\n` +
-      `@Bot show symbols\n\n` +
-      `**Use:** @Bot show symbols\n` +
-      `**Who:** Anyone\n` +
-      `**What:** Shows tags that include symbols like <3 or :3\n\n` +
-      `!Help\n` +
-      `**Use:** !Help\n` +
-      `**Who:** Anyone\n` +
-      `**What:** shows commands of bot and what they do`
-    )
-    .setColor(0x2B90D9)
-    .setFooter({ text: 'This message will be deleted in 60 seconds.' });
-
-  const sentMsg = await message.channel.send({ embeds: [helpEmbed] });
+  // UPDATED: React to user's message and delete after 5s
+  try { await message.react("✅"); } catch(e) {}
 
   setTimeout(async () => {
-    try { await sentMsg.delete(); } catch (e) {}
-  }, 60000);
+    if (message.deletable) { try { await message.delete(); } catch (e) {} }
+  }, 5000);
+
+  // UPDATED: Embed as per new spec
+  const helpEmbed = new EmbedBuilder()
+    .setTitle("#COMMANDS")
+    .setDescription(
+`**<@1372151527237488680> [Tag Name]**
+**Ping the bot and type tag you want to search without brackets)**`
+    )
+    .addFields(
+      { name: "<@1372151527237488680> show chinese tags", value: "**Searches Chinese Tags**" },
+      { name: "<@1372151527237488680> show japanese tags", value: "**Searches Japanese Tags**" },
+      { name: "<@1372151527237488680> show symbols", value: "**Searches Symbols (<3, :p, :3)**" },
+      { name: "<@1372151527237488680> !alltags", value: "**Total tags in database**" },
+      { name: "<@1372151527237488680> !check [invite-link]", value: "**checks if invite link is active**" },
+      { name: "<@1372151527237488680> at [Tag-Name] [Invite-Code] <:warning:892823499205406760>", value: "**At (Add Tag) Adds a TAG in database**" },
+      { name: "<@1372151527237488680> DT [Invite-Link] - <:warning:892823499205406760>", value: "**Deletes TAG from database**" },
+      { name: "<@1372151527237488680> RL [Old Invite-Link] [New Invite-Link] <:warning:892823499205406760>", value: "**Replaces Link of TAG**" },
+      { name: "Only Users With @BACKEND Role", value: "**Can Use Commands marked With <:warning:892823499205406760>**" }
+    )
+    .setColor(0xEABFB9) // Yellowish-pink
+    .setFooter({ text: 'type !help for commands' });
+
+  await message.author.send({ embeds: [helpEmbed] }).catch(async () => {
+    // fallback: send in channel but only mention user
+    await message.channel.send({ content: `<@${message.author.id}>`, embeds: [helpEmbed] });
+  });
 });
 
 // --- !fetch command for logging all guilds ---
@@ -327,10 +338,17 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// --- !alltags command (available to everyone)
+// --- UPDATED: !alltags command (available to everyone, works with mentions) ---
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
-  if (message.content.trim().toLowerCase() === "!alltags") {
+  // allow: !alltags, @Bot alltags, @bot alltags, ... (case-insensitive)
+  let content = message.content.toLowerCase().replace(/\s+/g, " ");
+  let botMentionRegex = new RegExp(`^<@!?${client.user?.id}>\\s*!?alltags$`, "i");
+  if (
+    content.trim() === "!alltags" ||
+    botMentionRegex.test(content.trim()) ||
+    content.trim().endsWith(" alltags") && message.mentions.has(client.user)
+  ) {
     let dbTags = [], fontedTags = [];
     try { dbTags = JSON.parse(fs.readFileSync(JSON_FILE)); } catch {}
     try { fontedTags = JSON.parse(fs.readFileSync(FONTED_FILE)); } catch {}
@@ -516,13 +534,116 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+// --- MAIN BOT MENTION HANDLER ---
+// Handles tag search, disables, symbols, history, emoji, etc.
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   if (!message.mentions.has(client.user)) return;
 
+  // --- NEW: Check if search is disabled in this channel ---
+  let disabledChannels = loadDisabledChannels();
+  if (disabledChannels.includes(message.channel.id)) {
+    // Prompt user to search in another channel, delete their message
+    await message.reply({
+      embeds: [
+        buildEmbed(
+          "❌ Search Disabled",
+          "Searching is disabled in this channel. Please use the designated search channel.",
+          0xff0000
+        ),
+      ],
+    });
+    setTimeout(() => { if (message.deletable) message.delete().catch(() => {}); }, 2500);
+    return;
+  }
+
   const args = message.content.trim().split(/\s+/);
   const command = args[1]?.toLowerCase() || "";
   const language = args[2]?.toLowerCase() || "";
+
+  // --- NEW: Disable Search in Channel ---
+  if (command === "!disable" && (args[2] || args[2]?.match(/^<#\d+>$|^\d+$/))) {
+    // Only allow users with manage channels or admin permissions
+    if (!message.member.permissions.has("ManageChannels") && !message.member.permissions.has("Administrator")) {
+      await message.reply({ embeds: [buildEmbed("❌ Permission Denied", "You need Manage Channels or Admin permission to use this.", 0xff0000)] });
+      return;
+    }
+    let targetChannelId = args[2]?.replace(/[<#>]/g, "");
+    if (!targetChannelId) {
+      await message.reply({ embeds: [buildEmbed("❌ Error", "Please provide a valid channel mention or channel ID.", 0xff0000)] });
+      return;
+    }
+    if (!disabledChannels.includes(targetChannelId)) {
+      disabledChannels.push(targetChannelId);
+      saveDisabledChannels(disabledChannels);
+      await message.reply({ embeds: [buildEmbed("✅ Search Disabled", `<#${targetChannelId}> is now disabled for searching.`, 0x32cd32)] });
+    } else {
+      await message.reply({ embeds: [buildEmbed("ℹ️ Already Disabled", `<#${targetChannelId}> is already disabled for searching.`, 0xffa500)] });
+    }
+    if (message.deletable) setTimeout(() => message.delete().catch(() => {}), 3000);
+    return;
+  }
+
+  // --- NEW: User History Command ---
+  if (command === "history") {
+    const history = loadHistory();
+    const userId = message.author.id;
+    const userHistory = history.users[userId] || [];
+
+    let historyText;
+    if (userHistory.length) {
+      historyText = userHistory.slice(-25).map(x =>
+        `${x.found ? "✅" : "❌"} \`${x.query}\` ${x.found ? `(${x.tagName})` : "(not found)"}`
+      ).join("\n");
+    } else {
+      historyText = "No search history found for you.";
+    }
+    const embed = new EmbedBuilder()
+      .setTitle(`Your Search History`)
+      .setDescription(historyText)
+      .setColor(0xEABFB9)
+      .setFooter({ text: "Most recent 25 searches" });
+    await message.channel.send({ content: `<@${userId}>`, embeds: [embed] });
+    return;
+  }
+
+  // --- NEW: Global History Command ---
+  if (
+    command === "!globalhistory" || command === "!gh" ||
+    command === "gh" || command === "globalhistory"
+  ) {
+    const history = loadHistory();
+    const global = history.global || {};
+    // Frequency map: tag -> { count, firstUser, users }
+    const items = Object.entries(global);
+    if (!items.length) {
+      await message.channel.send({ embeds: [
+        buildEmbed("Global Search History", "No global search records yet.", 0xEABFB9)
+      ] });
+      return;
+    }
+
+    // Sort by count desc
+    items.sort((a, b) => b[1].count - a[1].count);
+
+    let desc = items.map(([tag, info], i) => {
+      let ulist = "";
+      if (info.users.length > 3) {
+        ulist = `(${info.users.length}+)`;
+      } else {
+        ulist = info.users.map(uid => `<@${uid}>`).join(", ");
+      }
+      return `**${i+1}.** \`${tag}\` - Searched ${info.count} times ${ulist}`;
+    }).join("\n");
+
+    const embed = new EmbedBuilder()
+      .setTitle("Global Search History")
+      .setDescription(desc.slice(0, 4096))
+      .setColor(0xEABFB9)
+      .setFooter({ text: "Most searched tags by users" });
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
 
   // --- ADD TAG (Text Command, role-restricted) ---
   if (command === "addtag" || command === "at") {
@@ -912,17 +1033,159 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // --- SYMBOLS SHOWCASE SECTION ---
+  // --- UPDATED: SYMBOLS SHOWCASE SECTION ---
   if (command === "show" && language === "symbols") {
-    // ... unchanged ...
-    // [Keep your original code here]
+    // Pull symbols from DBTag and Fonted.json, dedup, sort by usage/popularity (fallback: alphabetically)
+    let dbTags = loadTags();
+    let fontedTags = loadFontedTags();
+    let symbolTags = dbTags.concat(fontedTags).filter(tag =>
+      SYMBOLS.some(sym => (tag.name && tag.name.includes(sym)) || (tag.keyword && tag.keyword.includes(sym)))
+    );
+
+    // Add common face symbols (expand as needed)
+    const symbolFaces = [
+      ">_<", "0_0", "^_^", "^-^", "^w^", "UwU", "OwO", "oWo", ":3", ":p", ":P", "<3"
+    ];
+
+    // Deduplicate on the symbols/faces themselves for button row
+    let uniqueFaces = [...new Set(symbolTags.map(tag =>
+      symbolFaces.find(face => (tag.name && tag.name.includes(face)) || (tag.keyword && tag.keyword.includes(face)))
+    ).filter(Boolean))];
+
+    // Add faces not in tags also
+    uniqueFaces = [...new Set(uniqueFaces.concat(symbolFaces))];
+
+    if (!symbolTags.length) {
+      await message.channel.send({
+        embeds: [buildEmbed("No Symbols Found", "No tags found for symbols.", 0xff0000)]
+      });
+      return;
+    }
+    let page = 0;
+    const pageSize = 6;
+    const totalPages = Math.ceil(symbolTags.length / pageSize);
+
+    function buildTagList(page) {
+      const chunk = symbolTags.slice(page * pageSize, (page + 1) * pageSize);
+      return chunk.map(t => `${t.name}\n${t.link}`).join("\n\n");
+    }
+
+    const embed = buildEmbed(
+      "Symbols Tags",
+      buildTagList(page),
+      0xFFD700
+    );
+    // Create a row of buttons for most common symbols/faces
+    const row = new ActionRowBuilder();
+    uniqueFaces.slice(0, 5).forEach(face => {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`symbol_face_${face}`)
+          .setLabel(face)
+          .setStyle(ButtonStyle.Secondary)
+      );
+    });
+    if (uniqueFaces.length > 5) {
+      row.addComponents(
+        new ButtonBuilder().setCustomId("symbol_face_more").setLabel("More...").setStyle(ButtonStyle.Primary)
+      );
+    }
+
+    // Pagination buttons
+    const pagingRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("symbols_prev")
+        .setLabel("⬅️")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId("symbols_next")
+        .setLabel("➡️")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(totalPages <= 1)
+    );
+    const sent = await message.channel.send({
+      content: `<@${message.author.id}>`,
+      embeds: [embed],
+      components: [row, pagingRow]
+    });
+
+    // Button collector
+    const filter = (interaction) =>
+      (interaction.customId.startsWith("symbol_face_") ||
+        interaction.customId === "symbols_prev" ||
+        interaction.customId === "symbols_next") &&
+      interaction.message.id === sent.id &&
+      interaction.user.id === message.author.id;
+    const collector = sent.createMessageComponentCollector({ filter, time: 180000 });
+    collector.on("collect", async (interaction) => {
+      if (interaction.customId === "symbols_prev" && page > 0) {
+        page--;
+      } else if (interaction.customId === "symbols_next" && page < totalPages - 1) {
+        page++;
+      } else if (interaction.customId.startsWith("symbol_face_")) {
+        let face = interaction.customId.replace("symbol_face_", "");
+        let filtered = symbolTags.filter(tag =>
+          (tag.name && tag.name.includes(face)) || (tag.keyword && tag.keyword.includes(face))
+        );
+        if (filtered.length) {
+          await interaction.update({
+            embeds: [buildEmbed(`Results for ${face}`, filtered.map(t => `${t.name}\n${t.link}`).join("\n\n"), 0xFFD700)],
+            components: [row, pagingRow]
+          });
+          return;
+        } else {
+          await interaction.reply({ content: `No tags found for ${face}`, ephemeral: true });
+          return;
+        }
+      }
+      // Otherwise, update page
+      await interaction.update({
+        embeds: [buildEmbed("Symbols Tags", buildTagList(page), 0xFFD700)],
+        components: [row, new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("symbols_prev")
+            .setLabel("⬅️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === 0),
+          new ButtonBuilder()
+            .setCustomId("symbols_next")
+            .setLabel("➡️")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page >= totalPages - 1)
+        )]
+      });
+    });
+    return;
   }
 
   // --- Normalized Multi-Variant Tag Search Section ---
   if (["dt", "rl"].includes(command)) return;
 
+  // --- NEW: First-time notice before search ---
+  if (!firstTimeSearchMap.has(message.author.id)) {
+    const firstEmbed = new EmbedBuilder()
+      .setTitle("Before you search")
+      .setDescription(
+        "**Note:**\n" +
+        "- Tags are 4 letters (max 5 w/ ligatures)\n" +
+        "- Try common or famous keywords\n" +
+        "- Most Tags are only english, but there are few other languages"
+      )
+      .setColor(0xEABFB9)
+      .setFooter({ text: "type !help for commands" });
+    await message.reply({ embeds: [firstEmbed] });
+    firstTimeSearchMap.add(message.author.id);
+  }
+
   const tagQuery = args.slice(1).join(' ').trim();
   if (!tagQuery) return;
+
+  // --- Emoji Search: If query is/has emoji, search tags with emoji in name/keyword ---
+  function isEmoji(str) {
+    // crude: look for surrogate pairs or common emoji ranges
+    return /([\u231A-\u27BF]|[\uD83C-\uDBFF\uDC00-\uDFFF])/.test(str);
+  }
 
   // PATCH: Fuzzy search animation and mention user
   let loadingEmbed = buildEmbed(
@@ -932,17 +1195,60 @@ client.on("messageCreate", async (message) => {
   );
   const sent = await message.channel.send({ embeds: [loadingEmbed] });
 
+  // --- NEW: History Tracking ---
+  function addSearchHistory(userId, query, found, tagName = null) {
+    let history = loadHistory();
+    if (!history.users[userId]) history.users[userId] = [];
+    history.users[userId].push({ query, found, tagName, ts: Date.now() });
+    // Only keep last 100 per user
+    if (history.users[userId].length > 100) history.users[userId] = history.users[userId].slice(-100);
+
+    // Global
+    if (!history.global[query]) history.global[query] = { count: 0, users: [] };
+    history.global[query].count++;
+    if (!history.global[query].users.includes(userId)) history.global[query].users.push(userId);
+    saveHistory(history);
+  }
+
   let results;
   try {
     const allTags = loadTags();
     const fontedTags = loadFontedTags();
 
-    const keywordResults = searchFontedTagsByKeyword(tagQuery, fontedTags);
-    const normResults = searchTagsNormalized(tagQuery, allTags);
+    let combinedResults = [];
+    let keywordResults = [];
+    let normResults = [];
+
+    // --- Emoji search ---
+    if (isEmoji(tagQuery)) {
+      // Search for tags containing emoji in name or keyword
+      keywordResults = fontedTags.filter(t =>
+        (t.keyword && t.keyword.includes(tagQuery)) || (t.name && t.name.includes(tagQuery))
+      );
+      normResults = allTags.filter(t =>
+        (t.name && t.name.includes(tagQuery))
+      );
+      combinedResults = [...keywordResults, ...normResults];
+      if (!combinedResults.length) {
+        // fallback: search for tags with just the emoji (if query is text+emoji)
+        let emojiMatch = tagQuery.match(/([\u231A-\u27BF]|[\uD83C-\uDBFF\uDC00-\uDFFF])/);
+        if (emojiMatch) {
+          keywordResults = fontedTags.filter(t =>
+            (t.keyword && t.keyword.includes(emojiMatch[0])) || (t.name && t.name.includes(emojiMatch[0]))
+          );
+          normResults = allTags.filter(t =>
+            (t.name && t.name.includes(emojiMatch[0]))
+          );
+          combinedResults = [...keywordResults, ...normResults];
+        }
+      }
+    } else {
+      keywordResults = searchFontedTagsByKeyword(tagQuery, fontedTags);
+      normResults = searchTagsNormalized(tagQuery, allTags);
+      combinedResults = [...keywordResults, ...normResults];
+    }
 
     // Prioritize Fonted.json, then DBTag.json
-    const combinedResults = [...keywordResults, ...normResults];
-
     if (combinedResults.length > 0) {
       let page = 0;
       const pageSize = 5;
@@ -1023,6 +1329,9 @@ client.on("messageCreate", async (message) => {
         await interaction.update({ embeds: [embedUpdated], components: [rowUpdated] });
       });
 
+      // Add to search history for each result found
+      addSearchHistory(message.author.id, tagQuery, true, combinedResults[0].name);
+
       return;
     }
   } catch (e) {}
@@ -1083,6 +1392,10 @@ client.on("messageCreate", async (message) => {
         );
         await interaction.update({ embeds: [embed], components: [rowUpdated] });
       });
+
+      // Add to search history for each result found
+      addSearchHistory(message.author.id, tagQuery, true, results[0].name);
+
     } else {
       let noResultMsg = "";
       if (tagQuery.length > 4) {
@@ -1104,6 +1417,14 @@ client.on("messageCreate", async (message) => {
         const channel = await client.channels.fetch(LOGGING_CHANNEL_ID);
         await updateNotFoundEmbed(channel);
       }
+      // Add to search history, not found
+      addSearchHistory(message.author.id, tagQuery, false, null);
+
+      // --- NEW: Delete failure message and user's original message after 60s
+      setTimeout(async () => {
+        try { await sent.delete(); } catch {}
+        try { if (message.deletable) await message.delete(); } catch {}
+      }, 60000);
     }
   } catch {
     const noResultEmbed = buildEmbed(
@@ -1112,6 +1433,12 @@ client.on("messageCreate", async (message) => {
       0xff0000
     );
     await sent.edit({ embeds: [noResultEmbed], components: [] });
+    // Add to search history, not found
+    addSearchHistory(message.author.id, tagQuery, false, null);
+    setTimeout(async () => {
+      try { await sent.delete(); } catch {}
+      try { if (message.deletable) await message.delete(); } catch {}
+    }, 60000);
   }
 });
 
